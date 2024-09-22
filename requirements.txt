@@ -1,0 +1,5 @@
+flask
+streamlit 
+numpy
+pandas 
+pytrends
