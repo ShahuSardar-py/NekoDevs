@@ -1,101 +1,121 @@
-from flask import Flask, render_template, request
-import time
-import random
-from pytrends.request import TrendReq
 import pandas as pd
 import plotly.graph_objects as go
-from requests.exceptions import HTTPError
+import streamlit as st
+from pytrends.request import TrendReq
+import time
+from pytrends.exceptions import TooManyRequestsError
 
-app = Flask(__name__)
-
-# Define geo codes for Indian states
+# Create a dictionary mapping state names to geo codes
 state_geo_codes = {
-    'Andhra Pradesh': 'IN-AP', 'Arunachal Pradesh': 'IN-AR', 'Assam': 'IN-AS',
-    'Bihar': 'IN-BR', 'Chhattisgarh': 'IN-CT', 'Goa': 'IN-GA', 'Gujarat': 'IN-GJ',
-    'Haryana': 'IN-HR', 'Himachal Pradesh': 'IN-HP', 'Jharkhand': 'IN-JH',
-    'Karnataka': 'IN-KA', 'Kerala': 'IN-KL', 'Madhya Pradesh': 'IN-MP',
-    'Maharashtra': 'IN-MH', 'Manipur': 'IN-MN', 'Meghalaya': 'IN-ML',
-    'Mizoram': 'IN-MZ', 'Nagaland': 'IN-NL', 'Odisha': 'IN-OR', 'Punjab': 'IN-PB',
-    'Rajasthan': 'IN-RJ', 'Sikkim': 'IN-SK', 'Tamil Nadu': 'IN-TN', 'Telangana': 'IN-TG',
-    'Tripura': 'IN-TR', 'Uttar Pradesh': 'IN-UP', 'Uttarakhand': 'IN-UT',
-    'West Bengal': 'IN-WB'
+    'Maharashtra': 'IN-MH',
+    'Delhi': 'IN-DL',
+    'Karnataka': 'IN-KA',
+    'Gujarat': 'IN-GJ',
+    'Tamil Nadu': 'IN-TN',
+    'West Bengal': 'IN-WB',
+    'Uttar Pradesh': 'IN-UP',
+    'Rajasthan': 'IN-RJ',
+    # Add more states as needed
 }
+st.set_page_config(
+    page_title="InsightZ |",
+    page_icon="📈",
+    layout='wide'
+)
 
-def analyze_and_plot_trends(state_name, womens_wear_kw):
-    # Set up pytrends
-    pytrends = TrendReq(hl='en-US', tz=360)
-    geo_code = state_geo_codes.get(state_name)
+top_df= pd.read_csv('D:/nekostreamlit/dress-top.csv').head(5)
+
+
+def fetch_interest_over_time(pytrends):
+    for i in range(5):  # Retry up to 5 times
+        try:
+            return pytrends.interest_over_time()
+        except TooManyRequestsError:
+            wait_time = 2 ** i  # Exponential backoff
+            st.warning(f"fetching results...")
+            time.sleep(wait_time)  # Wait before retrying
+    st.error("Failed to fetch data after multiple attempts.")
+    return None
+
+# Streamlit application
+st.title('InsightZ trend analysis')
+
+# Sidebar for input
+st.sidebar.header('Input Parameters')
+state_name = st.sidebar.selectbox('Select a State', list(state_geo_codes.keys()))
+mens_wear_input = st.sidebar.text_input("Enter the brands available (comma-separated, e.g., Shirt, Jeans, Jacket):")
+keywords = st.sidebar.text_input("Enter Topic")
     
-    # Check if the state name is valid
-    if geo_code is None:
-        return f"Invalid state name: {state_name}. Please enter a valid state."
 
-    # Function to analyze Google Trends data
-    def analyze_trends(kw_list, category, geo_code):
-        retries = 3
-        for i in range(retries):
-            try:
-                pytrends.build_payload(kw_list, cat=0, timeframe='today 12-m', geo=geo_code, gprop='')
-                data = pytrends.interest_over_time()
-                if 'isPartial' in data.columns:
-                    data = data.drop(columns=['isPartial'])
-                # Explicitly downcast data types
-                data = data.apply(pd.to_numeric, errors='ignore', downcast='float')
-                df = pd.DataFrame(data)
-                most_trending_brand = df.sum().idxmax()
-                return df, most_trending_brand
-            except HTTPError as e:
-                if e.response.status_code == 429:
-                    wait_time = (2 ** i) + random.uniform(0, 1)
-                    time.sleep(wait_time)
-                else:
-                    raise e
+if st.sidebar.button('Analyze'):
+    geo_code = state_geo_codes.get(state_name)
+    pytrends = TrendReq(hl='en-US', tz=360)
+    suggestions=pytrends.suggestions(keyword=keywords)
+    topic_df = pd.DataFrame(suggestions)
+    final_df= topic_df.drop(columns="mid").head(5)
 
-    # Get trends for women's wear
-    womens_wear_data, most_trending_brand = analyze_trends(womens_wear_kw, "Women's Wear", geo_code)
+    mens_wear_kw = [item.strip() for item in mens_wear_input.split(',')]
 
-    # Function to plot trends
-    def plot_trends(df, category):
+    # Function to plot search interest for the selected category
+    def plot_trends(kw_list, geo_code):
+        pytrends.build_payload(kw_list, cat=0, timeframe='today 12-m', geo=geo_code, gprop='')
+        data = fetch_interest_over_time(pytrends)
+        if data is None:
+            return None
+
+        if 'isPartial' in data.columns:
+            data = data.drop(columns=['isPartial'])
+
+        df = pd.DataFrame(data)
         top_2 = df.sum().nlargest(2).index
+
         fig = go.Figure()
         for product in top_2:
             fig.add_trace(go.Scatter(x=df.index, y=df[product], mode='lines', name=product))
+
         fig.update_layout(
-            width=550,
-            height=300,
+            title=f'Search Interest Over Time for Top 2 Searched Brands in ({state_name})',
             xaxis_title='Date',
             yaxis_title='Search Interest',
-            legend_title=f'{category} Item',
+            legend_title='Brands',
             xaxis_tickangle=-45
         )
-        return fig.to_html(full_html=False)
+        return fig
 
-    # Plot for women's wear
-    plot_html = plot_trends(womens_wear_data, "Women's Wear")
-    return most_trending_brand, plot_html
+    def plot_pie_chart(kw_list, geo_code):
+        pytrends.build_payload(kw_list, cat=0, timeframe='today 12-m', geo=geo_code, gprop='')
+        data = fetch_interest_over_time(pytrends)
+        if data is None:
+            return None
 
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    graph_html = None
-    state_name = request.form.get('state')
-    womens_wear_kw = request.form.get('brands')
+        if 'isPartial' in data.columns:
+            data = data.drop(columns=['isPartial'])
 
-    if state_name and womens_wear_kw:
-        most_trending_brand, graph_html = analyze_and_plot_trends(state_name, womens_wear_kw)
+        total_interest = data.sum()
+        fig = go.Figure(data=[go.Pie(labels=total_interest.index, values=total_interest.values, hole=0.3)])
+        fig.update_layout(title=f'Search Interest Proportion for Entered Brands in ({state_name})')
+        return fig
+
+    # Display charts in columns
+    col1, col2 = st.columns([2,1], gap="large")
+
+    with col1:
+        line_chart = plot_trends(mens_wear_kw, geo_code)
+        if line_chart:
+            st.plotly_chart(line_chart)
+
+    with col2:
+        pie_chart = plot_pie_chart(mens_wear_kw, geo_code)
+        if pie_chart:
+            st.plotly_chart(pie_chart)
+    col3, col4= st.columns(2)
+
+    st.divider()
+
+
+    with col3:
+        st.write(top_df)
 
     
-
-    return render_template('home.html', graph_html=graph_html, state_name=state_name, womens_wear_kw=womens_wear_kw, state_geo_codes=state_geo_codes)
-@app.route('/suggestions', methods=['POST', 'GET'])
-def suggestions():
-    if request.method == 'POST':
-        keyword = request.form['keyword']
-        pytrend = TrendReq()
-        suggestions = pytrend.suggestions(keyword=keyword)
-        topic_df = pd.DataFrame(suggestions)
-        topic_df.drop(columns=['mid'], inplace=True)
-        return render_template('home.html', tables=[topic_df.to_html(classes='data')], titles=topic_df.columns.values)
-    return render_template('home.html')
-    
-if __name__ == "__main__":
-    app.run(debug=True)
+    with col4:
+        st.write(final_df)
